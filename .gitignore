@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+venv/
+*.log
+*.sqlite
+*.sqlite-*
+*.raw
+*.token
+.DS_Store
+Thumbs.db

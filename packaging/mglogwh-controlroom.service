@@ -1,0 +1,23 @@
+[Unit]
+Description=MGlogWH Control Room local dashboard
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/mglogwh-controlroom
+ExecStart=/usr/local/bin/mglogwh-controlroom
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

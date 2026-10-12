@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode_file=/etc/mglogwh-controlroom/mode
+if [[ ! -f $mode_file || -L $mode_file ]]; then
+  echo "Missing or unsafe mode file: $mode_file" >&2
+  exit 1
+fi
+mode=$(<"$mode_file")
+if [[ $mode != wsl && $mode != linux ]]; then
+  echo "Invalid Control Room mode: $mode" >&2
+  exit 1
+fi
+cd /opt/mglogwh-controlroom
+exec /usr/bin/python3 -m controlroom \
+  --mode "$mode" --host 127.0.0.1 --port 8765 \
+  --token-file /etc/mglogwh-controlroom/token "$@"
