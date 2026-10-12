@@ -111,6 +111,21 @@ class ControlRoomHandler(BaseHTTPRequestHandler):
     server: ControlRoomServer
     protocol_version = "HTTP/1.1"
 
+    def log_request(self, code="-", size="-"):
+        # Polling every second would otherwise produce an unbounded access log.
+        try:
+            if int(code) < 400:
+                return
+        except (TypeError, ValueError):
+            pass
+        super().log_request(code, size)
+
+    def log_error(self, format, *args):
+        # An idle keep-alive socket reaching our ten-second limit is expected.
+        if format.startswith("Request timed out:"):
+            return
+        super().log_error(format, *args)
+
     def setup(self):
         super().setup()
         self.connection.settimeout(10)
