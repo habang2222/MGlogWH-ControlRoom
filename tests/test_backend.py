@@ -199,6 +199,21 @@ class BackendTests(Fixture):
             self.backend.save_rules([rule], saved["revision"])
         self.assertEqual(old_client.exception.status, 409)
 
+    def test_implicit_legacy_rule_is_visible_for_migration(self):
+        for missing in (True, False):
+            with self.subTest(missing=missing):
+                value = json.loads(self.config.read_text())
+                if missing:
+                    value.pop("critical_rules", None)
+                else:
+                    value["critical_rules"] = []
+                self.config.write_text(json.dumps(value))
+                current = self.backend.rules()
+                self.assertEqual(current["schema"], "legacy")
+                self.assertEqual(current["rules"], [
+                    {"id": 1, "event_type": "openat", "path": value["protected_path"],
+                     "protected": False}])
+
     def test_rule_stats_are_forwarded_without_guessing_missing_values(self):
         health = json.loads((self.run / "health.json").read_text())
         health.update(rule_stats=[{"rule_id": 1, "matched": 10, "selected": 7,

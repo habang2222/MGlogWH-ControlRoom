@@ -192,7 +192,13 @@ class SensorBackend:
         if "event_rules" in parsed and "critical_rules" in parsed:
             raise BackendError("두 규칙 스키마가 동시에 설정됐습니다. MGlogWH 설정을 확인하세요.", 503)
         schema = "event_rules_v1" if "event_rules" in parsed else "legacy"
-        return {"rules": parsed.get(RULE_SCHEMAS[schema], []), "revision": _revision(raw), "raw": parsed,
+        rules = parsed.get(RULE_SCHEMAS[schema], [])
+        if schema == "legacy" and rules == []:
+            # MGlogWH creates this effective rule when critical_rules is absent
+            # or empty. Expose the same rule so the editor can migrate it.
+            rules = [{"id": 1, "event_type": "openat", "path": parsed.get("protected_path"),
+                      "protected": False}]
+        return {"rules": rules, "revision": _revision(raw), "raw": parsed,
                 "schema": schema,
                 "mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid}
 
