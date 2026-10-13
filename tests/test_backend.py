@@ -52,6 +52,9 @@ def validate_rules(rules):
             rule['event_type'] not in ('openat','exec') or not rule['path'].startswith('/')):
             raise ValueError('invalid rule')
 
+def config(path):
+    return json.loads(Path(path).read_text())
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('action')
@@ -213,6 +216,27 @@ class BackendTests(Fixture):
                 self.assertEqual(current["rules"], [
                     {"id": 1, "event_type": "openat", "path": value["protected_path"],
                      "protected": False}])
+
+    def test_pending_apply_compares_normalized_config_with_run(self):
+        manifest_path = self.run / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        normalized = self.backend._manager_module().config(self.config)
+        canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+        manifest["config_sha256"] = hashlib.sha256(canonical).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        self.assertIs(self.backend.rules()["pending_apply"], False)
+
+        changed = json.loads(self.config.read_text())
+        changed["critical_rules"][0]["path"] = "/etc/shadow"
+        self.config.write_text(json.dumps(changed))
+        self.assertIs(self.backend.rules()["pending_apply"], True)
+
+        manifest.pop("config_sha256")
+        manifest_path.write_text(json.dumps(manifest))
+        self.assertIsNone(self.backend.rules()["pending_apply"])
+
+        (self.data / "current.json").unlink()
+        self.assertIs(self.backend.rules()["pending_apply"], True)
 
     def test_rule_stats_are_forwarded_without_guessing_missing_values(self):
         health = json.loads((self.run / "health.json").read_text())

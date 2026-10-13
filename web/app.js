@@ -12,7 +12,7 @@
     feedSkipped: false,
     rules: [], savedRules: [], revision: '', rulesDirty: false,
     ruleSchema: 'legacy', editorSchema: 'legacy', upgradePending: false,
-    pendingApply: false, rulesBusy: false, files: [], filePath: '',
+    pendingApply: null, ruleDemo: false, rulesBusy: false, files: [], filePath: '',
     pollCount: 0, started: false
   };
   const viewNames = {overview: '관제 현황', rules: '이벤트 규칙', runs: '실행 기록', files: '저장 파일'};
@@ -628,6 +628,8 @@
       state.editorSchema = state.ruleSchema;
       state.upgradePending = false;
       state.revision = data.revision || '';
+      state.pendingApply = data.pending_apply === true ? true : data.pending_apply === false ? false : null;
+      state.ruleDemo = data.validation === 'DEMO_SHAPE_ONLY';
       state.rulesDirty = false;
       renderRules();
     } catch (error) {
@@ -649,6 +651,12 @@
     $('rules-state').className = 'rules-state dirty';
     updateRuleActions();
   }
+  function ruleApplyLabel() {
+    if (state.ruleDemo) return '데모 규칙 저장됨';
+    if (state.pendingApply === true) return '저장됨 · 다음 수집 실행에 적용';
+    if (state.pendingApply === false) return '최근 실행 설정과 일치';
+    return '저장된 설정 · 최근 실행 적용 여부 확인 불가';
+  }
   function renderRules() {
     const advanced = state.editorSchema === 'event_rules_v1';
     $('rule-upgrade').hidden = advanced;
@@ -661,8 +669,8 @@
       text('advanced-rule-count', `${state.rules.length} / 8`);
       text('advanced-rules-revision', state.revision ? `revision ${state.revision.slice(0, 12)}` : '');
       text('advanced-rules-state', state.upgradePending ? '고급 규칙 전환 준비 · 저장 전 JSON을 검토하세요.' :
-        state.pendingApply ? '저장됨 · 수집기 적용 대기' : '설정과 동기화됨');
-      $('advanced-rules-state').className = `rules-state ${state.rulesDirty || state.pendingApply ? 'dirty' : 'saved'}`;
+        ruleApplyLabel());
+      $('advanced-rules-state').className = `rules-state ${state.rulesDirty || state.pendingApply !== false ? 'dirty' : 'saved'}`;
       renderAdvancedSummary();
       updateRuleActions();
       return;
@@ -702,8 +710,8 @@
     text('rule-count', `${state.rules.length} / 8`);
     text('rules-revision', state.revision ? `revision ${state.revision.slice(0, 12)}` : '');
     if (!state.rulesDirty) {
-      text('rules-state', state.pendingApply ? '저장됨 · 수집기 적용 대기' : '설정과 동기화됨');
-      $('rules-state').className = `rules-state ${state.pendingApply ? 'dirty' : 'saved'}`;
+      text('rules-state', ruleApplyLabel());
+      $('rules-state').className = `rules-state ${state.pendingApply !== false ? 'dirty' : 'saved'}`;
     }
     updateRuleActions();
   }
@@ -715,7 +723,10 @@
     $('advanced-reset-rules').disabled = !state.rulesDirty || state.rulesBusy;
     $('advanced-save-rules').disabled = !state.rulesDirty || state.rulesBusy;
     $('apply-rules').disabled = state.rulesDirty || !state.revision || state.rulesBusy;
-    text('apply-hint', state.rulesDirty ? '변경사항을 먼저 저장하세요.' : state.pendingApply ? '저장된 변경사항을 현재 수집기에 반영할 수 있습니다.' : '적용하면 새 수집 실행이 시작됩니다.');
+    text('apply-hint', state.rulesDirty ? '변경사항을 먼저 저장하세요.' :
+      state.pendingApply === true ? '저장된 설정은 다음 수집 실행에 적용됩니다.' :
+      state.pendingApply === null ? '현재 실행 적용 여부를 확인할 수 없습니다. 적용하면 새 수집 실행이 시작됩니다.' :
+      '적용하면 새 수집 실행이 시작됩니다.');
     $('upgrade-rules').disabled = state.rulesBusy || state.ruleSchema !== 'legacy' || advanced;
   }
   function readAdvancedRules() {
@@ -820,7 +831,8 @@
       state.editorSchema = state.ruleSchema;
       state.upgradePending = false;
       state.rulesDirty = false;
-      state.pendingApply = true;
+      state.pendingApply = data.pending_apply === true ? true : data.pending_apply === false ? false : null;
+      state.ruleDemo = data.validation === 'DEMO_SHAPE_ONLY';
       notification('규칙을 저장했습니다. 적용하려면 수집기를 재시작하세요.');
       renderRules();
       await refreshOverview();

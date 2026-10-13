@@ -206,7 +206,32 @@ class SensorBackend:
         cfg = self._config()
         return {"rules": cfg["rules"], "revision": cfg["revision"], "schema": cfg["schema"],
                 "applies": "NEXT_START_ONLY",
+                "pending_apply": self._pending_apply(cfg),
                 "validation": "DEMO_SHAPE_ONLY" if self.demo else "MGLOGWH_MANAGE_VALIDATE"}
+
+    def _pending_apply(self, cfg):
+        if self.demo:
+            return False
+        if cfg["revision"] is None:
+            return None
+        try:
+            run = self._run(None)
+            if run is None:
+                return True
+            manifest = _json_file(run / "manifest.json", {})
+            recorded = manifest.get("config_sha256") if isinstance(manifest, dict) else None
+            if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded):
+                return None
+            manager = self._manager_module()
+            if not hasattr(manager, "config"):
+                return None
+            normalized = manager.config(self.config_path)
+            canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+            return hashlib.sha256(canonical).hexdigest() != recorded
+        except (BackendError, OSError, ValueError, TypeError, KeyError, RecursionError):
+            # A missing or invalid comparison cannot prove that the active run
+            # already uses the settings shown by the editor.
+            return None
 
     def _index_snapshot(self, run: Path):
         module = self._manager_module()
