@@ -19,7 +19,7 @@ from .backend import BackendError, SensorBackend
 
 COOKIE = "mglogwh_session"
 SESSION_SECONDS = 12 * 3600
-MAX_BODY = 16 * 1024
+MAX_BODY = 256 * 1024  # JSON editor text is escaped once more inside the API envelope.
 STATIC_FILES = {"/": "index.html", "/index.html": "index.html",
                 "/app.css": "app.css", "/app.js": "app.js"}
 
@@ -62,6 +62,10 @@ def _json_unique(pairs):
             raise ValueError("중복 JSON 키: " + key)
         result[key] = value
     return result
+
+
+def _json_nonfinite(value):
+    raise ValueError("JSON에서는 NaN/Infinity를 사용할 수 없습니다: " + value)
 
 
 class ControlRoomServer(ThreadingHTTPServer):
@@ -228,8 +232,9 @@ class ControlRoomHandler(BaseHTTPRequestHandler):
         if not 0 <= length <= MAX_BODY:
             raise BackendError("요청이 너무 큽니다.", 413)
         try:
-            value = json.loads(self.rfile.read(length), object_pairs_hook=_json_unique)
-        except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            value = json.loads(self.rfile.read(length), object_pairs_hook=_json_unique,
+                               parse_constant=_json_nonfinite)
+        except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise BackendError(f"JSON을 읽지 못했습니다: {exc}", 400) from exc
         if not isinstance(value, dict):
             raise BackendError("JSON 객체가 필요합니다.", 400)
@@ -310,9 +315,19 @@ class ControlRoomHandler(BaseHTTPRequestHandler):
             backend = self.server.backend
             if path == "/api/rules":
                 value = self._body()
-                if set(value) != {"rules", "revision"}:
-                    raise BackendError("rules와 revision이 필요합니다.", 400)
-                return self._json(200, backend.save_rules(value["rules"], value["revision"]))
+                if set(value) == {"rules", "revision"}:
+                    # Preserve the original client contract for legacy installations.
+                    return self._json(200, backend.save_rules(value["rules"], value["revision"]))
+                if set(value) == {"schema", "rules_json", "revision"}:
+                    if not isinstance(value["rules_json"], str):
+                        raise BackendError("rules_json은 JSON 문자열이어야 합니다.", 400)
+                    try:
+                        rules = json.loads(value["rules_json"], object_pairs_hook=_json_unique,
+                                           parse_constant=_json_nonfinite)
+                    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+                        raise BackendError(f"규칙 JSON을 읽지 못했습니다: {exc}", 400) from exc
+                    return self._json(200, backend.save_rules(rules, value["revision"], value["schema"]))
+                raise BackendError("schema, rules_json, revision이 필요합니다.", 400)
             if path == "/api/apply":
                 value = self._body()
                 if set(value) != {"confirm", "revision"}:

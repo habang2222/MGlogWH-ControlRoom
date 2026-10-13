@@ -32,6 +32,8 @@ RUN_FILES = frozenset({
     "loss-ledger.jsonl", "loss-ledger.json", "metadata.jsonl",
 })
 MAX_DOWNLOAD = 256 * 1024 * 1024
+MAX_CONFIG = 64 * 1024
+RULE_SCHEMAS = {"legacy": "critical_rules", "event_rules_v1": "event_rules"}
 RUN_NAME = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
@@ -41,10 +43,10 @@ def _json_file(path: Path, default):
             raw = stream.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             raise BackendError(f"상태 파일이 너무 큽니다: {path.name}", 503)
-        return json.loads(raw)
+        return json.loads(raw, parse_constant=_reject_nonfinite)
     except FileNotFoundError:
         return default
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise BackendError(f"손상된 JSON 파일: {path.name}", 503) from exc
 
 
@@ -59,6 +61,10 @@ def _unique_pairs(pairs):
             raise ValueError("중복 설정 키: " + key)
         result[key] = value
     return result
+
+
+def _reject_nonfinite(value):
+    raise ValueError("JSON에서 허용하지 않는 숫자: " + value)
 
 
 def _iso_timestamp(ns: int | None) -> str | None:
@@ -85,13 +91,13 @@ class SensorBackend:
             {"id": 2, "event_type": "exec", "path": "/usr/bin/sudo", "protected": False},
         ]
         self.demo_revision = _revision(json.dumps(self.demo_rules, sort_keys=True).encode())
+        self.demo_schema = "legacy"
         self._manager = None
+        self._manager_signature = None
         self.counts_lock = threading.Lock()
         self.counts_cache = {}
 
     def _manager_module(self):
-        if self._manager is not None:
-            return self._manager
         path = self.sensor_root / "manage.py"
         if self.sensor_root.resolve() != self.sensor_root:
             raise BackendError("연결된 MGlogWH 코드 경로는 허용하지 않습니다.", 503)
@@ -106,15 +112,24 @@ class SensorBackend:
             raise BackendError("신뢰할 수 없는 MGlogWH manage.py 권한입니다.", 503)
         if hasattr(os, "geteuid") and os.geteuid() == 0 and (info.st_uid != 0 or directory.st_uid != 0):
             raise BackendError("MGlogWH 설치 파일과 디렉터리는 root 소유여야 합니다.", 503)
+        signature = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if self._manager is not None and self._manager_signature == signature:
+            return self._manager
         spec = importlib.util.spec_from_file_location("mglogwh_installed_manage", path)
         if spec is None or spec.loader is None:
             raise BackendError("MGlogWH manage.py를 읽지 못했습니다.", 503)
         module = importlib.util.module_from_spec(spec)
         try:
-            spec.loader.exec_module(module)
+            # Read source each time the installed file changes. Python's timestamp-based
+            # bytecode cache can otherwise reuse old code for a same-size rapid update.
+            source = spec.loader.get_source(spec.name)
+            if source is None:
+                raise ValueError("MGlogWH manage.py 소스를 읽지 못했습니다.")
+            exec(compile(source, str(path), "exec"), module.__dict__)
         except Exception as exc:
             raise BackendError("MGlogWH manage.py 로드에 실패했습니다.", 503) from exc
         self._manager = module
+        self._manager_signature = signature
         return module
 
     def _current_id(self) -> str | None:
@@ -155,7 +170,8 @@ class SensorBackend:
 
     def _config(self):
         if self.demo:
-            return {"rules": list(self.demo_rules), "revision": self.demo_revision}
+            return {"rules": list(self.demo_rules), "revision": self.demo_revision,
+                    "schema": self.demo_schema}
         try:
             info = self.config_path.lstat()
             if not stat.S_ISREG(info.st_mode):
@@ -164,21 +180,27 @@ class SensorBackend:
                 raise BackendError("설정 파일은 다른 사용자가 변경할 수 없어야 합니다.", 503)
             raw = self.config_path.read_bytes()
         except FileNotFoundError:
-            return {"rules": [], "revision": None}
-        if len(raw) > 8192:
-            raise BackendError("설정 파일이 8 KiB를 넘습니다.", 503)
+            return {"rules": [], "revision": None, "schema": "legacy"}
+        if len(raw) > MAX_CONFIG:
+            raise BackendError("설정 파일이 64 KiB를 넘습니다.", 503)
         try:
-            parsed = json.loads(raw, object_pairs_hook=_unique_pairs)
-        except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            parsed = json.loads(raw, object_pairs_hook=_unique_pairs, parse_constant=_reject_nonfinite)
+        except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise BackendError("설정 파일이 올바른 JSON이 아닙니다.", 503) from exc
         if not isinstance(parsed, dict):
             raise BackendError("설정 파일 형식이 올바르지 않습니다.", 503)
-        return {"rules": parsed.get("critical_rules", []), "revision": _revision(raw), "raw": parsed,
+        if "event_rules" in parsed and "critical_rules" in parsed:
+            raise BackendError("두 규칙 스키마가 동시에 설정됐습니다. MGlogWH 설정을 확인하세요.", 503)
+        schema = "event_rules_v1" if "event_rules" in parsed else "legacy"
+        return {"rules": parsed.get(RULE_SCHEMAS[schema], []), "revision": _revision(raw), "raw": parsed,
+                "schema": schema,
                 "mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid}
 
     def rules(self):
         cfg = self._config()
-        return {"rules": cfg["rules"], "revision": cfg["revision"], "applies": "NEXT_START_ONLY"}
+        return {"rules": cfg["rules"], "revision": cfg["revision"], "schema": cfg["schema"],
+                "applies": "NEXT_START_ONLY",
+                "validation": "DEMO_SHAPE_ONLY" if self.demo else "MGLOGWH_MANAGE_VALIDATE"}
 
     def _index_snapshot(self, run: Path):
         module = self._manager_module()
@@ -278,7 +300,14 @@ class SensorBackend:
                 "index": status.get("index", {}), "loss": self._loss_summary(collector),
                 "counts": self._counts(run), "config": self.rules(),
                 "run": {"id": run.name, "path": str(run)} if run else None, "data_root": str(self.data_dir),
-                "storage": status.get("storage", {})}
+                "storage": status.get("storage", {}),
+                "rule_stats": status.get("rule_stats", collector.get("rule_stats")),
+                "rule_stats_scope": status.get("rule_stats_scope", collector.get("rule_stats_scope")),
+                "rule_stats_snapshot_complete": status.get("rule_stats_snapshot_complete",
+                                                           collector.get("rule_stats_snapshot_complete")),
+                "rule_engine_schema_version": status.get("rule_engine_schema_version"),
+                "rule_version": status.get("rule_version", collector.get("rule_version")),
+                "policy_version": status.get("policy_version", collector.get("policy_version"))}
 
     @staticmethod
     def _loss_summary(health: dict):
@@ -306,6 +335,8 @@ class SensorBackend:
             entries.append({"id": path.name, "started_at": manifest.get("created_utc") if isinstance(manifest, dict) else None,
                             "state": health.get("state", "UNKNOWN") if isinstance(health, dict) else "UNKNOWN",
                             "event_count": index.get("indexed_records", 0) if isinstance(index, dict) else 0,
+                            "raw_schema": manifest.get("raw_schema") if isinstance(manifest, dict) else None,
+                            "policy_version": manifest.get("policy_version") if isinstance(manifest, dict) else None,
                             "path": str(path)})
         entries.sort(key=lambda item: item["started_at"] or "", reverse=True)
         return {"runs": entries[:200], "current_run_id": current}
@@ -423,13 +454,25 @@ class SensorBackend:
             os.close(fd)
             raise
 
-    def save_rules(self, rules, revision):
+    def save_rules(self, rules, revision, schema=None):
+        if schema is None:
+            schema = self._config()["schema"]
+            if schema != "legacy":
+                raise BackendError("고급 규칙 저장에는 스키마를 명시해야 합니다.", 409)
+        if not isinstance(schema, str) or schema not in RULE_SCHEMAS:
+            raise BackendError("지원하지 않는 규칙 스키마입니다.", 400)
         if self.demo:
             with self.write_lock:
                 if revision != self.demo_revision:
                     raise BackendError("규칙이 다른 곳에서 변경됐습니다. 새로고침 후 다시 시도하세요.", 409)
-                _validate_demo_rules(rules)
+                if schema == "legacy":
+                    if self.demo_schema != "legacy":
+                        raise BackendError("고급 규칙을 레거시 규칙으로 덮어쓸 수 없습니다.", 409)
+                    _validate_demo_rules(rules)
+                else:
+                    _validate_demo_event_rules(rules)
                 self.demo_rules = rules
+                self.demo_schema = schema
                 self.demo_revision = _revision(json.dumps(rules, sort_keys=True).encode())
                 return self.rules()
         with self.write_lock:
@@ -438,6 +481,8 @@ class SensorBackend:
                 raise BackendError("MGlogWH 설정 파일이 없습니다.", 503)
             if revision != cfg["revision"]:
                 raise BackendError("규칙이 다른 곳에서 변경됐습니다. 새로고침 후 다시 시도하세요.", 409)
+            if cfg["schema"] == "event_rules_v1" and schema == "legacy":
+                raise BackendError("고급 규칙을 레거시 규칙으로 덮어쓸 수 없습니다.", 409)
             self._manager_module()  # Verify ownership and permissions before executing manage.py.
             directory = self.config_path.parent.lstat()
             if not stat.S_ISDIR(directory.st_mode) or directory.st_mode & 0o022:
@@ -446,10 +491,11 @@ class SensorBackend:
                     directory.st_uid != 0 or cfg["uid"] != 0):
                 raise BackendError("설정 디렉터리와 파일은 root 소유여야 합니다.", 503)
             value = dict(cfg["raw"])
-            value["critical_rules"] = rules
+            value.pop("critical_rules" if schema == "event_rules_v1" else "event_rules", None)
+            value[RULE_SCHEMAS[schema]] = rules
             candidate = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-            if len(candidate) > 8192:
-                raise BackendError("설정 파일은 8 KiB 이하여야 합니다.", 400)
+            if len(candidate) > MAX_CONFIG:
+                raise BackendError("설정 파일은 64 KiB 이하여야 합니다.", 400)
             temp = None
             try:
                 fd, temp = tempfile.mkstemp(prefix=".config.controlroom.", suffix=".json", dir=self.config_path.parent)
@@ -569,3 +615,52 @@ def _validate_demo_rules(rules):
         if (rule["event_type"], path) in targets:
             raise BackendError("중복 규칙 경로입니다.")
         ids.add(rule["id"]); targets.add((rule["event_type"], path))
+
+
+def _validate_demo_event_rules(rules):
+    """Validate the editor shape in demo; live saves always use MGlogWH validate."""
+    if not isinstance(rules, list) or not 1 <= len(rules) <= 8:
+        raise BackendError("고급 규칙은 1..8개여야 합니다.")
+    ids = set()
+
+    def condition(node, depth, counter):
+        counter[0] += 1
+        if counter[0] > 24 or depth > 4 or not isinstance(node, dict):
+            raise BackendError("조건은 규칙당 24개 노드·깊이 4 이하여야 합니다.")
+        if set(node) == {"not"}:
+            return condition(node["not"], depth + 1, counter)
+        if set(node) in ({"all"}, {"any"}):
+            children = next(iter(node.values()))
+            if not isinstance(children, list) or not 2 <= len(children) <= 8:
+                raise BackendError("all/any에는 2..8개 조건이 필요합니다.")
+            for child in children:
+                condition(child, depth + 1, counter)
+            return
+        if (set(node) != {"field", "op", "value"} or
+                not isinstance(node["field"], str) or not isinstance(node["op"], str)):
+            raise BackendError("조건은 field, op, value를 지정해야 합니다.")
+
+    for rule in rules:
+        if not isinstance(rule, dict) or not {"id", "when", "priority", "overload_policy"} <= set(rule):
+            raise BackendError("고급 규칙 필수 키가 없습니다.")
+        if set(rule) - {"id", "enabled", "precedence", "when", "priority", "overload_policy", "quarantine"}:
+            raise BackendError("고급 규칙에 지원하지 않는 키가 있습니다.")
+        rid = rule["id"]
+        if type(rid) is not int or not 1 <= rid <= 255 or rid in ids:
+            raise BackendError("고급 규칙 ID는 중복 없는 정수 1..255여야 합니다.")
+        ids.add(rid)
+        if "enabled" in rule and type(rule["enabled"]) is not bool:
+            raise BackendError("enabled는 boolean이어야 합니다.")
+        if "precedence" in rule and (type(rule["precedence"]) is not int or
+                                      not 0 <= rule["precedence"] <= 1000):
+            raise BackendError("precedence는 정수 0..1000이어야 합니다.")
+        if rule["priority"] not in ("BULK", "NORMAL", "CRITICAL"):
+            raise BackendError("지원하지 않는 priority입니다.")
+        if rule["overload_policy"] not in ("NORMAL_COLLECTION", "QUARANTINE", "QUARANTINE_EXEMPT"):
+            raise BackendError("지원하지 않는 overload_policy입니다.")
+        if rule["priority"] != "CRITICAL" and rule["overload_policy"] != "NORMAL_COLLECTION":
+            raise BackendError("BULK/NORMAL은 NORMAL_COLLECTION만 지원합니다.")
+        if "quarantine" in rule and (rule["overload_policy"] != "QUARANTINE" or
+                                     not isinstance(rule["quarantine"], dict) or not rule["quarantine"]):
+            raise BackendError("quarantine override는 CRITICAL+QUARANTINE에서만 사용합니다.")
+        condition(rule["when"], 1, [0])

@@ -58,7 +58,17 @@ if __name__ == '__main__':
     parser.add_argument('--config')
     args = parser.parse_args()
     value = json.loads(Path(args.config).read_text())
-    validate_rules(value['critical_rules'])
+    if 'event_rules' in value:
+        if 'critical_rules' in value:
+            raise ValueError('both rule schemas')
+        rules = value['event_rules']
+        if not isinstance(rules, list) or not 1 <= len(rules) <= 8:
+            raise ValueError('event_rules 1..8')
+        for rule in rules:
+            if not {'id','when','priority','overload_policy'} <= set(rule):
+                raise ValueError('invalid event rule')
+    else:
+        validate_rules(value['critical_rules'])
 '''
 
 
@@ -169,6 +179,48 @@ class BackendTests(Fixture):
         self.assertEqual(invalid.exception.status, 400)
         self.assertEqual(self.backend.rules()["revision"], saved["revision"])
 
+    def test_event_rule_migration_and_schema_guard(self):
+        rule = {"id": 1, "when": {"all": [
+            {"field": "event_type", "op": "eq", "value": "openat"},
+            {"field": "path", "op": "eq", "value": "/tmp/decoy"}]},
+            "priority": "CRITICAL", "overload_policy": "QUARANTINE",
+            "quarantine": {"quarantine_sample_interval_ms": 100}}
+        revision = self.backend.rules()["revision"]
+        saved = self.backend.save_rules([rule], revision, "event_rules_v1")
+        self.assertEqual(saved["schema"], "event_rules_v1")
+        value = json.loads(self.config.read_text())
+        self.assertEqual(value["event_rules"], [rule])
+        self.assertNotIn("critical_rules", value)
+        self.assertEqual(value["bulk_rate"], 500)
+        with self.assertRaises(BackendError) as downgrade:
+            self.backend.save_rules([], saved["revision"], "legacy")
+        self.assertEqual(downgrade.exception.status, 409)
+        with self.assertRaises(BackendError) as old_client:
+            self.backend.save_rules([rule], saved["revision"])
+        self.assertEqual(old_client.exception.status, 409)
+
+    def test_rule_stats_are_forwarded_without_guessing_missing_values(self):
+        health = json.loads((self.run / "health.json").read_text())
+        health.update(rule_stats=[{"rule_id": 1, "matched": 10, "selected": 7,
+                                   "ring_failed": None, "collector_durable": [2, 0, 0]}],
+                      rule_stats_scope="KERNEL_AND_COLLECTOR_SNAPSHOT",
+                      rule_stats_snapshot_complete=False)
+        (self.run / "health.json").write_text(json.dumps(health))
+        overview = self.backend.overview()
+        self.assertEqual(overview["rule_stats"][0]["selected"], 7)
+        self.assertIsNone(overview["rule_stats"][0]["ring_failed"])
+        self.assertFalse(overview["rule_stats_snapshot_complete"])
+
+    def test_running_controlroom_uses_updated_sensor_manager(self):
+        self.assertEqual(self.backend.events(None, None, 1)["events"][0]["path"], "/tmp/two")
+        installed = self.sensor / "manage.py"
+        replacement = self.sensor / "manage.py.updated"
+        replacement.write_text(installed.read_text() +
+                               "\ndef decode_record(raw):\n    return {'path': '/updated'}\n")
+        replacement.chmod(0o644)
+        os.replace(replacement, installed)
+        self.assertEqual(self.backend.events(None, None, 1)["events"][0]["path"], "/updated")
+
     def test_file_allowlist_and_no_symlink_escape(self):
         names = {entry["name"]: entry for entry in self.backend.files(None)["files"]}
         self.assertTrue(names["manifest.json"]["downloadable"])
@@ -195,6 +247,14 @@ class BackendTests(Fixture):
         self.assertEqual(demo.apply(demo.rules()["revision"], "restart")["demo"], True)
         changed = [{"id": 7, "event_type": "exec", "path": "/usr/bin/bash", "protected": False}]
         self.assertEqual(demo.save_rules(changed, demo.rules()["revision"])["rules"], changed)
+
+    def test_demo_rejects_unsupported_advanced_policy_combination(self):
+        demo = SensorBackend(sensor_root=self.sensor, data_dir=self.data,
+                             config_path=self.config, mode="linux", demo=True)
+        invalid = [{"id": 1, "when": {"field": "path", "op": "eq", "value": "/etc/shadow"},
+                    "priority": "NORMAL", "overload_policy": "QUARANTINE"}]
+        with self.assertRaises(BackendError):
+            demo.save_rules(invalid, demo.rules()["revision"], "event_rules_v1")
 
     def test_apply_requires_explicit_confirmation_and_current_revision(self):
         revision = self.backend.rules()["revision"]
@@ -258,6 +318,31 @@ class HttpTests(Fixture):
         self.assertEqual(self.request("POST", "/api/apply", {"confirm": "restart", "revision": "x"},
                                       {"Cookie": cookie, "X-CSRF-Token": body["csrf_token"],
                                        "Origin": "http://evil.example"})[0], 403)
+
+    def test_advanced_editor_rejects_duplicate_json_keys(self):
+        _, headers, session = self.request("POST", "/api/login", {"token": self.token})
+        auth = {"Cookie": headers["Set-Cookie"].split(";", 1)[0],
+                "X-CSRF-Token": session["csrf_token"]}
+        revision = self.backend.rules()["revision"]
+        bad = '[{"id":1,"id":2,"when":{"field":"path","op":"eq","value":"/tmp/x"},' \
+              '"priority":"CRITICAL","overload_policy":"QUARANTINE"}]'
+        status, _, _ = self.request("POST", "/api/rules",
+                                    {"schema": "event_rules_v1", "rules_json": bad,
+                                     "revision": revision}, auth)
+        self.assertEqual(status, 400)
+        self.assertEqual(self.backend.rules()["schema"], "legacy")
+        status, _, _ = self.request("POST", "/api/rules",
+                                    {"schema": "event_rules_v1", "rules_json": '[{"id":NaN}]',
+                                     "revision": revision}, auth)
+        self.assertEqual(status, 400)
+        good = json.dumps([{"id": 4, "when": {"field": "uid", "op": "eq", "value": 1000},
+                            "priority": "CRITICAL", "overload_policy": "QUARANTINE_EXEMPT"}])
+        status, _, response = self.request("POST", "/api/rules",
+                                          {"schema": "event_rules_v1", "rules_json": good,
+                                           "revision": revision}, auth)
+        self.assertEqual(status, 200)
+        self.assertEqual(response["schema"], "event_rules_v1")
+        self.assertEqual(response["rules"][0]["when"]["field"], "uid")
 
 
 if __name__ == "__main__":

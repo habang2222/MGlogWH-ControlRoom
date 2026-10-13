@@ -11,10 +11,11 @@
     feedGeneration: 0, eventIndex: null, eventMessage: '', lastEventUpdate: null,
     feedSkipped: false,
     rules: [], savedRules: [], revision: '', rulesDirty: false,
+    ruleSchema: 'legacy', editorSchema: 'legacy', upgradePending: false,
     pendingApply: false, rulesBusy: false, files: [], filePath: '',
     pollCount: 0, started: false
   };
-  const viewNames = {overview: '관제 현황', rules: '중요 규칙', runs: '실행 기록', files: '저장 파일'};
+  const viewNames = {overview: '관제 현황', rules: '이벤트 규칙', runs: '실행 기록', files: '저장 파일'};
   const priorityNames = {0: 'BULK', 1: 'NORMAL', 2: 'CRITICAL'};
   const kindNames = {1: 'exec', 2: 'openat'};
   const numberFormat = new Intl.NumberFormat('ko-KR');
@@ -108,17 +109,28 @@
     if (typeof value === 'number') return kindNames[value] || `kind ${value}`;
     return String(value || 'unknown');
   }
+  function policyName(value) {
+    if (value == null || value === '') return null;
+    const names = {0: 'NORMAL_COLLECTION', 1: 'QUARANTINE', 2: 'QUARANTINE_EXEMPT'};
+    const key = String(value);
+    return Object.hasOwn(names, key) ? names[key] : key.toUpperCase();
+  }
   function policyLabel(value) {
-    const policy = String(value || '').toUpperCase();
-    if (!policy) return '기본';
-    if (policy.includes('QUARANTINE')) return '격리';
-    if (policy.includes('PROTECTED')) return '보호';
+    const policy = policyName(value);
+    if (!policy) return 'UNKNOWN';
+    if (policy === 'QUARANTINE_EXEMPT' || policy === 'PROTECTED_CRITICAL') return '격리 면제';
+    if (policy === 'QUARANTINE') return '격리';
+    if (policy === 'NORMAL_COLLECTION') return '일반 수집';
+    if (policy === 'CRITICAL') return 'Critical 기본 수집';
+    if (policy === 'NORMAL') return 'Normal 기본 수집';
+    if (policy === 'BULK') return 'Bulk 기본 수집';
     if (policy.includes('SAMPLE')) return '샘플';
     return policy.replaceAll('_', ' ');
   }
   function policyClass(value) {
-    const policy = String(value || '').toUpperCase();
-    return policy.includes('QUARANTINE') ? 'quarantine' : policy.includes('PROTECTED') ? 'protected' : '';
+    const policy = policyName(value);
+    return policy === 'QUARANTINE' ? 'quarantine' :
+      policy === 'QUARANTINE_EXEMPT' || policy === 'PROTECTED_CRITICAL' ? 'protected' : '';
   }
   function priorityBadge(event) {
     const priority = priorityValue(event.priority);
@@ -252,6 +264,62 @@
       return {label, value: Number(value)};
     }).filter(Boolean);
   }
+  function observedValue(value) {
+    return value == null || !Number.isFinite(Number(value)) ? 'UNKNOWN' : count(value);
+  }
+  function observedLanes(value) {
+    if (!Array.isArray(value) || value.length !== 3) return 'UNKNOWN';
+    return ['Critical', '일반', '격리'].map((label, index) => `${label} ${observedValue(value[index])}`).join(' · ');
+  }
+  function renderRuleStats() {
+    const data = state.overview || {};
+    const list = $('rule-stats-list');
+    list.replaceChildren();
+    const versions = [data.rule_engine_schema_version == null ? null : `엔진 스키마 v${data.rule_engine_schema_version}`,
+      data.rule_version == null ? null : `규칙 v${data.rule_version}`,
+      data.policy_version == null ? null : `정책 v${data.policy_version}`].filter(Boolean);
+    text('rule-stats-version', versions.join(' · '));
+    const stats = data.rule_stats;
+    if (data.demo) {
+      text('rule-stats-note', '데모 통계는 실제 수집 증거가 아닙니다.');
+      return;
+    }
+    if (!Array.isArray(stats) || !stats.length) {
+      text('rule-stats-note', '현재 실행의 규칙별 통계가 없습니다. 미집계는 0건의 증거가 아닙니다.');
+      return;
+    }
+    const scope = data.rule_stats_scope;
+    const scopeLabel = scope == null ? '집계 범위 미상' : typeof scope === 'string' ? scope : JSON.stringify(scope);
+    text('rule-stats-note', `현재 실행 기준 · ${data.rule_stats_snapshot_complete === true ? '스냅샷 완료' : '스냅샷 완전성 UNKNOWN'} · ${scopeLabel}. 평가 전 손실은 규칙별로 귀속되지 않을 수 있습니다.`);
+    for (const stat of stats) {
+      if (!stat || typeof stat !== 'object') continue;
+      const item = node('article', 'rule-stat-item');
+      const title = node('div', 'rule-stat-title');
+      title.append(node('strong', '', `RULE ${stat.rule_id ?? '—'}`),
+        node('span', '', priorityNames[priorityValue(stat.priority)] || '우선순위 UNKNOWN'),
+        node('span', '', policyLabel(stat.configured_policy)),
+        node('small', '', `선택 순위 ${stat.precedence ?? 'UNKNOWN'}`));
+      const metrics = node('dl', 'rule-stat-metrics');
+      const values = [
+        ['평가', stat.evaluated], ['일치', stat.matched], ['조건 UNKNOWN', stat.unknown],
+        ['최종 선택', stat.selected], ['Ring 제출', stat.ring_submitted],
+        ['격리 요약', stat.quarantine_summarized], ['Ring 실패', stat.ring_failed],
+        ['Bulk 예산 제외', stat.bulk_budget_suppressed], ['Bulk 예산 경쟁', stat.bulk_budget_contention],
+        ['수집기 관측', observedLanes(stat.collector_observed)],
+        ['수집기 저장', observedLanes(stat.collector_appended)],
+        ['내구 기록', observedLanes(stat.collector_durable)],
+        ['큐 거절', observedLanes(stat.collector_queue_rejected)],
+        ['용량 거절', observedLanes(stat.collector_quota_rejected)]
+      ];
+      for (const [label, value] of values) {
+        const field = node('div', 'rule-stat-metric');
+        field.append(node('dt', '', label), node('dd', '', typeof value === 'string' ? value : observedValue(value)));
+        metrics.append(field);
+      }
+      item.append(title, metrics);
+      list.append(item);
+    }
+  }
   function renderOverview() {
     const data = state.overview || {};
     const collector = data.collector || {};
@@ -295,6 +363,7 @@
     else if (!data.demo && $('global-notice').textContent.startsWith('MGlogWH 수집기를')) showNotice('');
     renderCounts();
     renderFeedStatus();
+    renderRuleStats();
     if (state.activeView === 'files' && !state.filePath) renderFileLocation();
   }
   function renderCounts() {
@@ -368,6 +437,9 @@
       const name = node('strong', 'run-name', run.id || 'ID 없음');
       name.title = String(run.id || '');
       main.append(name, node('small', 'run-path', run.path || '경로 정보 없음'));
+      const schemaInfo = [run.raw_schema == null ? null : `Raw schema ${run.raw_schema}`,
+        run.policy_version == null ? null : `정책 v${run.policy_version}`].filter(Boolean).join(' · ');
+      if (schemaInfo) main.append(node('small', 'run-path', schemaInfo));
       const start = node('span', 'run-meta', dateLabel(run.started_at));
       const rawState = String(run.state || 'UNKNOWN').toUpperCase();
       const badge = node('span', `run-state-badge ${rawState === 'RUNNING' ? 'running' : rawState === 'FAILED' ? 'failed' : 'stopped'}`, translatedState(rawState));
@@ -467,7 +539,8 @@
     return state.events.filter((event) => {
       if (state.priority !== 'all' && String(priorityValue(event.priority)) !== state.priority) return false;
       if (!query) return true;
-      return [event.comm, event.path, event.pid, event.uid, kindLabel(event.kind), event.rule_id, event.effective_policy]
+      return [event.comm, event.path, event.pid, event.uid, kindLabel(event.kind), event.rule_id,
+        event.effective_policy, event.rule_version, event.policy_version]
         .some((value) => String(value == null ? '' : value).toLocaleLowerCase().includes(query));
     }).slice(-250).reverse();
   }
@@ -527,7 +600,13 @@
     const list = node('dl', 'inspect-fields');
     const fields = [
       ['추정 시각', eventTime(event)], ['프로세스', event.comm], ['PID / UID', `${event.pid ?? '—'} / ${event.uid ?? '—'}`],
-      ['경로', event.path], ['결과', event.result], ['규칙 ID', event.rule_id], ['적용 정책', policyLabel(event.effective_policy)],
+      ['경로', event.path], ['결과', event.result], ['최종 규칙 ID', event.rule_id],
+      ['원래 중요도', event.original_priority == null ? null :
+        priorityNames[priorityValue(event.original_priority)] || event.original_priority],
+      ['설정된 폭주 정책', event.configured_overload_policy == null ? null :
+        policyLabel(event.configured_overload_policy)],
+      ['실제 처리 상태', event.effective_policy == null ? null : policyLabel(event.effective_policy)],
+      ['규칙 버전', event.rule_version], ['정책 버전', event.policy_version],
       ['실행 ID', event.run_id || feedRunId()], ['행 ID', event.rowid], ['모노토닉 ns', event.monotonic_ns]
     ];
     for (const [label, value] of fields) {
@@ -545,6 +624,9 @@
       const data = await api('/api/rules');
       state.rules = Array.isArray(data.rules) ? structuredClone(data.rules) : [];
       state.savedRules = structuredClone(state.rules);
+      state.ruleSchema = data.schema === 'event_rules_v1' ? 'event_rules_v1' : 'legacy';
+      state.editorSchema = state.ruleSchema;
+      state.upgradePending = false;
       state.revision = data.revision || '';
       state.rulesDirty = false;
       renderRules();
@@ -568,6 +650,23 @@
     updateRuleActions();
   }
   function renderRules() {
+    const advanced = state.editorSchema === 'event_rules_v1';
+    $('rule-upgrade').hidden = advanced;
+    $('advanced-rules-panel').hidden = !advanced;
+    document.querySelector('.rules-layout').classList.toggle('is-advanced', advanced);
+    document.querySelector('.rules-panel').hidden = advanced;
+    document.querySelector('.explainer').hidden = advanced;
+    if (advanced) {
+      $('advanced-rules-json').value = JSON.stringify(state.rules, null, 2);
+      text('advanced-rule-count', `${state.rules.length} / 8`);
+      text('advanced-rules-revision', state.revision ? `revision ${state.revision.slice(0, 12)}` : '');
+      text('advanced-rules-state', state.upgradePending ? '고급 규칙 전환 준비 · 저장 전 JSON을 검토하세요.' :
+        state.pendingApply ? '저장됨 · 수집기 적용 대기' : '설정과 동기화됨');
+      $('advanced-rules-state').className = `rules-state ${state.rulesDirty || state.pendingApply ? 'dirty' : 'saved'}`;
+      renderAdvancedSummary();
+      updateRuleActions();
+      return;
+    }
     const list = $('rule-list');
     const fragment = document.createDocumentFragment();
     for (const [index, rule] of state.rules.entries()) {
@@ -609,11 +708,72 @@
     updateRuleActions();
   }
   function updateRuleActions() {
+    const advanced = state.editorSchema === 'event_rules_v1';
     $('add-rule').disabled = state.rules.length >= 8 || state.rulesBusy;
     $('reset-rules').disabled = !state.rulesDirty || state.rulesBusy;
     $('save-rules').disabled = !state.rulesDirty || state.rulesBusy;
+    $('advanced-reset-rules').disabled = !state.rulesDirty || state.rulesBusy;
+    $('advanced-save-rules').disabled = !state.rulesDirty || state.rulesBusy;
     $('apply-rules').disabled = state.rulesDirty || !state.revision || state.rulesBusy;
     text('apply-hint', state.rulesDirty ? '변경사항을 먼저 저장하세요.' : state.pendingApply ? '저장된 변경사항을 현재 수집기에 반영할 수 있습니다.' : '적용하면 새 수집 실행이 시작됩니다.');
+    $('upgrade-rules').disabled = state.rulesBusy || state.ruleSchema !== 'legacy' || advanced;
+  }
+  function readAdvancedRules() {
+    let rules;
+    try { rules = JSON.parse($('advanced-rules-json').value); }
+    catch (error) { throw new Error(`JSON 문법 오류: ${error.message}`); }
+    if (!Array.isArray(rules) || rules.length < 1 || rules.length > 8) {
+      throw new Error('event_rules는 1~8개 규칙의 JSON 배열이어야 합니다.');
+    }
+    return rules;
+  }
+  function renderAdvancedSummary(rules = state.rules) {
+    const summary = $('advanced-rule-summary');
+    summary.replaceChildren();
+    if (!Array.isArray(rules)) return;
+    for (const rule of rules) {
+      const item = node('div', 'advanced-rule-item');
+      item.append(node('strong', '', `RULE ${rule?.id ?? '—'}`),
+        node('span', '', String(rule?.priority || '우선순위 미지정')),
+        node('span', '', policyLabel(rule?.overload_policy)),
+        node('small', '', `선택 순위 ${rule?.precedence ?? '기본'}${rule?.enabled === false ? ' · 비활성' : ''}`));
+      summary.append(item);
+    }
+  }
+  function markAdvancedDirty() {
+    state.rulesDirty = true;
+    try {
+      const parsed = readAdvancedRules();
+      text('advanced-rule-count', `${parsed.length} / 8`);
+      renderAdvancedSummary(parsed);
+      text('advanced-rules-state', '저장되지 않은 변경사항');
+      $('advanced-rules-state').className = 'rules-state dirty';
+    } catch (error) {
+      text('advanced-rules-state', error.message);
+      $('advanced-rules-state').className = 'rules-state error';
+      $('advanced-rule-summary').replaceChildren();
+    }
+    updateRuleActions();
+  }
+  function upgradeRules() {
+    if (state.ruleSchema !== 'legacy' || state.rulesBusy) return;
+    const legacy = collectRules();
+    const invalid = validateRules(legacy);
+    if (invalid) { notification(invalid, true); return; }
+    state.rules = legacy.map((rule) => ({
+      id: rule.id,
+      when: {all: [
+        {field: 'event_type', op: 'eq', value: rule.event_type},
+        {field: 'path', op: 'eq', value: rule.path}
+      ]},
+      priority: 'CRITICAL',
+      overload_policy: rule.protected ? 'QUARANTINE_EXEMPT' : 'QUARANTINE'
+    }));
+    state.editorSchema = 'event_rules_v1';
+    state.upgradePending = true;
+    state.rulesDirty = true;
+    renderRules();
+    $('advanced-rules-json').focus();
   }
   function validateRules(rules) {
     if (rules.length < 1 || rules.length > 8) return '규칙은 1개 이상 8개 이하로 설정하세요.';
@@ -639,23 +799,35 @@
     $('rule-list').lastElementChild?.querySelector('[data-field="path"]')?.focus();
   }
   async function saveRules() {
-    const rules = collectRules();
-    const invalid = validateRules(rules);
-    if (invalid) { notification(invalid, true); text('rules-state', invalid); $('rules-state').className = 'rules-state error'; return; }
+    const advanced = state.editorSchema === 'event_rules_v1';
+    let rules;
+    try { rules = advanced ? readAdvancedRules() : collectRules(); }
+    catch (error) { notification(error.message, true); return; }
+    if (!advanced) {
+      const invalid = validateRules(rules);
+      if (invalid) { notification(invalid, true); text('rules-state', invalid); $('rules-state').className = 'rules-state error'; return; }
+    }
     state.rulesBusy = true; updateRuleActions();
     try {
-      const data = await api('/api/rules', {method: 'POST', body: {revision: state.revision, rules}});
+      const data = await api('/api/rules', {method: 'POST', body: {
+        revision: state.revision, schema: state.editorSchema,
+        rules_json: advanced ? $('advanced-rules-json').value : JSON.stringify(rules)
+      }});
       state.rules = structuredClone(data.rules || rules);
       state.savedRules = structuredClone(state.rules);
       state.revision = data.revision || state.revision;
+      state.ruleSchema = data.schema || state.editorSchema;
+      state.editorSchema = state.ruleSchema;
+      state.upgradePending = false;
       state.rulesDirty = false;
       state.pendingApply = true;
       notification('규칙을 저장했습니다. 적용하려면 수집기를 재시작하세요.');
       renderRules();
       await refreshOverview();
     } catch (error) {
-      text('rules-state', error.message);
-      $('rules-state').className = 'rules-state error';
+      const id = advanced ? 'advanced-rules-state' : 'rules-state';
+      text(id, error.message);
+      $(id).className = 'rules-state error';
       notification(error.message, true);
     } finally { state.rulesBusy = false; updateRuleActions(); }
   }
@@ -746,7 +918,8 @@
   function exportCsv() {
     const rows = state.visibleEvents;
     if (!rows.length) { notification('CSV로 저장할 표시 이벤트가 없습니다.', true); return; }
-    const columns = ['wall_time', 'time_approximate', 'priority', 'kind', 'comm', 'pid', 'uid', 'path', 'result', 'effective_policy', 'rule_id', 'run_id', 'rowid'];
+    const columns = ['wall_time', 'time_approximate', 'priority', 'original_priority', 'kind', 'comm',
+      'pid', 'uid', 'path', 'result', 'effective_policy', 'rule_id', 'rule_version', 'policy_version', 'run_id', 'rowid'];
     const lines = [columns.map(csvCell).join(',')];
     for (const event of rows) lines.push(columns.map((column) => csvCell(event[column])).join(','));
     const blob = new Blob([`\ufeff${lines.join('\r\n')}\r\n`], {type: 'text/csv;charset=utf-8'});
@@ -808,6 +981,16 @@
     $('pause-button').addEventListener('click', () => setPaused(!state.paused));
     $('csv-button').addEventListener('click', exportCsv);
     $('add-rule').addEventListener('click', addRule);
+    $('upgrade-rules').addEventListener('click', upgradeRules);
+    $('advanced-rules-json').addEventListener('input', markAdvancedDirty);
+    $('advanced-save-rules').addEventListener('click', saveRules);
+    $('advanced-reset-rules').addEventListener('click', () => {
+      state.rules = structuredClone(state.savedRules);
+      state.editorSchema = state.ruleSchema;
+      state.upgradePending = false;
+      state.rulesDirty = false;
+      renderRules();
+    });
     $('reset-rules').addEventListener('click', () => {
       state.rules = structuredClone(state.savedRules);
       state.rulesDirty = false;

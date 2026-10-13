@@ -16,3 +16,36 @@
 .app-shell,.main-content,.page-content,.work-grid,.feed-panel{min-width:0}
 .table-scroll{max-width:100%;-webkit-overflow-scrolling:touch}
 @media(max-width:700px){.feed-gap{margin:0 15px 12px}.topbar,.page-content{max-width:100vw}body{overflow-x:clip}}
+
+/* Rules engine editor keeps the original simple form intact for legacy sensors. */
+.rule-upgrade{padding:20px 23px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:22px}
+.rule-upgrade h2{margin:3px 0 4px;font-size:16px}
+.rule-upgrade p,.advanced-help{font-size:11px;line-height:1.7;color:var(--muted);margin:0}
+.rule-upgrade .button{white-space:nowrap}
+.advanced-rules-panel{margin-bottom:16px}
+.advanced-rules-panel .panel-heading{border-bottom:1px solid var(--line-soft)}
+.advanced-help{padding:18px 23px 8px}
+.advanced-help code{color:#bde9d6;background:#1a2d2c;border-radius:3px;padding:1px 3px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.advanced-label{display:block;margin:9px 23px 7px;color:#d7e9e1;font-size:11px;font-weight:700}
+.advanced-json{display:block;width:calc(100% - 46px);min-height:360px;max-height:70vh;resize:vertical;margin:0 23px 17px;padding:15px;background:#0a131c;border:1px solid var(--line);border-radius:6px;color:#dcece7;font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2;outline:none}
+.advanced-json:focus{border-color:#5daa90}
+.advanced-rule-summary{display:flex;flex-wrap:wrap;gap:8px;padding:0 23px 17px}
+.advanced-rule-item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;background:#172530;border:1px solid var(--line);border-radius:6px;color:#bfcdd1;font-size:10px}
+.advanced-rule-item strong{color:var(--mint);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.advanced-rule-item small{color:var(--subtle)}
+.rules-layout.is-advanced{display:block}
+.rules-layout.is-advanced .rules-aside{display:block}
+.rules-layout.is-advanced .apply-panel{max-width:none}
+.rule-stats-panel{margin-bottom:16px}
+.rule-stats-panel .panel-heading{border-bottom:1px solid var(--line-soft)}
+.rule-stats-note{margin:0;padding:14px 23px;color:var(--muted);font-size:11px;line-height:1.7;overflow-wrap:anywhere}
+.rule-stats-list{display:grid;gap:10px;padding:0 23px 20px}
+.rule-stat-item{border:1px solid var(--line);background:#111d27;border-radius:7px;padding:14px}
+.rule-stat-title{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin-bottom:13px;font-size:11px;color:var(--muted)}
+.rule-stat-title strong{color:var(--mint);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.rule-stat-title small{color:var(--subtle)}
+.rule-stat-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:9px 16px;margin:0}
+.rule-stat-metric dt{font-size:9px;color:var(--subtle)}
+.rule-stat-metric dd{margin:2px 0 0;font-size:11px;color:#d8e7e6;overflow-wrap:anywhere}
+@media(max-width:700px){.rule-upgrade{align-items:stretch;flex-direction:column;padding:16px}.advanced-help{padding:15px 16px 8px}.advanced-label{margin-left:16px}.advanced-json{width:calc(100% - 32px);margin:0 16px 15px;min-height:310px}.advanced-rule-summary{padding:0 16px 16px}}
+@media(max-width:700px){.rule-stats-note{padding:14px 16px}.rule-stats-list{padding:0 16px 16px}.rule-stat-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
