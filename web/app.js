@@ -564,7 +564,7 @@
       const priority = node('td'); priority.append(priorityBadge(event));
       const main = node('td');
       const mainInner = node('div', 'event-main');
-      mainInner.append(node('strong', '', `${kindLabel(event.kind)} · ${event.comm || '프로세스 미상'}`), node('small', '', `PID ${event.pid ?? '—'}${event.rule_id != null ? ` · RULE ${event.rule_id}` : ''}`));
+      mainInner.append(node('strong', '', `${kindLabel(event.kind)} · ${event.comm || '프로세스 미상'}`), node('small', '', `PID ${event.pid ?? '—'}${Number.isInteger(event.rule_id) && event.rule_id > 0 ? ` · RULE ${event.rule_id}` : ''}`));
       main.append(mainInner);
       const path = node('td');
       const pathText = node('span', 'truncate', event.path || '—');
@@ -600,7 +600,8 @@
     const list = node('dl', 'inspect-fields');
     const fields = [
       ['추정 시각', eventTime(event)], ['프로세스', event.comm], ['PID / UID', `${event.pid ?? '—'} / ${event.uid ?? '—'}`],
-      ['경로', event.path], ['결과', event.result], ['최종 규칙 ID', event.rule_id],
+      ['경로', event.path], ['결과', event.result],
+      ['최종 규칙 ID', event.rule_id === 0 ? '규칙 미선택' : event.rule_id],
       ['원래 중요도', event.original_priority == null ? null :
         priorityNames[priorityValue(event.original_priority)] || event.original_priority],
       ['설정된 폭주 정책', event.configured_overload_policy == null ? null :
