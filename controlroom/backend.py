@@ -33,6 +33,7 @@ RUN_FILES = frozenset({
 })
 MAX_DOWNLOAD = 256 * 1024 * 1024
 MAX_CONFIG = 64 * 1024
+APPLY_VERIFY_SECONDS = 10
 RULE_SCHEMAS = {"legacy": "critical_rules", "event_rules_v1": "event_rules"}
 RUN_NAME = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -590,6 +591,10 @@ class SensorBackend:
                                    "현재 설정이 유효하지 않습니다.", 400)
             if self._config()["revision"] != revision:
                 raise BackendError("검증 중 설정이 변경됐습니다. 새로고침 후 다시 시도하세요.", 409)
+            normalized = self._manager_module().config(self.config_path)
+            canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+            expected_hash = hashlib.sha256(canonical).hexdigest()
+            previous_run_id = self._current_id()
             try:
                 result = subprocess.run(["systemctl", "restart", "mglogwh.service"],
                                         capture_output=True, text=True, timeout=90, check=False)
@@ -597,8 +602,25 @@ class SensorBackend:
                 raise BackendError(f"MGlogWH 서비스를 재시작하지 못했습니다: {exc}", 503) from exc
             if result.returncode:
                 raise BackendError((result.stderr or result.stdout).strip()[:1000] or "서비스 재시작 실패", 503)
-            return {"ok": True, "demo": False, "run_id": self._current_id(),
-                    "message": "MGlogWH 서비스 재시작을 요청했습니다. 새 run 상태를 확인하세요."}
+            deadline = time.monotonic() + APPLY_VERIFY_SECONDS
+            while True:
+                try:
+                    run_id = self._current_id()
+                    if run_id is not None and run_id != previous_run_id:
+                        run = self._run(run_id)
+                        manifest = _json_file(run / "manifest.json", {})
+                        if (isinstance(manifest, dict) and
+                                manifest.get("config_sha256") == expected_hash and
+                                self._status(run).get("state") == "RUNNING"):
+                            return {"ok": True, "demo": False, "run_id": run_id,
+                                    "message": "새 run에서 저장된 규칙 설정과 수집기 실행을 확인했습니다."}
+                except (BackendError, OSError, ValueError, TypeError, KeyError):
+                    # A newly published run may not have written its status yet.
+                    pass
+                if time.monotonic() >= deadline:
+                    raise BackendError("재시작 명령은 반환됐지만 새 run의 규칙 적용과 실행을 확인하지 못했습니다. "
+                                       "서비스 상태와 run 기록을 확인하세요.", 503)
+                time.sleep(0.2)
 
     def _demo_count(self):
         return 36 + int((time.monotonic() - self.demo_started) * 2)

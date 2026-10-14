@@ -297,19 +297,69 @@ class BackendTests(Fixture):
 
     def test_apply_requires_explicit_confirmation_and_current_revision(self):
         revision = self.backend.rules()["revision"]
-        with mock.patch("controlroom.backend.subprocess.run") as run:
+        with mock.patch("controlroom.backend.subprocess.run") as run, \
+             mock.patch.object(self.backend, "_status", return_value={"state": "RUNNING"}):
             with self.assertRaises(BackendError):
                 self.backend.apply(revision, "")
             with self.assertRaises(BackendError) as stale:
                 self.backend.apply("stale", "restart")
             self.assertEqual(stale.exception.status, 409)
             run.assert_not_called()
-            run.return_value.returncode = 0
+            def successful_restart(command, **_kwargs):
+                if command[:2] == ["systemctl", "restart"]:
+                    new_id = str(uuid.uuid4())
+                    new_run = self.data / "runs" / new_id
+                    new_run.mkdir()
+                    normalized = self.backend._manager_module().config(self.config)
+                    canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+                    (new_run / "manifest.json").write_text(json.dumps({
+                        "config_sha256": hashlib.sha256(canonical).hexdigest()}))
+                    (self.data / "current.json").write_text(json.dumps({"run_id": new_id}))
+                return mock.Mock(returncode=0)
+            run.side_effect = successful_restart
             applied = self.backend.apply(revision, "restart")
             self.assertTrue(applied["ok"])
+            self.assertEqual(applied["run_id"], json.loads((self.data / "current.json").read_text())["run_id"])
             self.assertEqual(run.call_count, 2)
             self.assertEqual(run.call_args_list[0].args[0][2], "validate")
             self.assertEqual(run.call_args_list[1].args[0], ["systemctl", "restart", "mglogwh.service"])
+
+    def test_apply_does_not_claim_success_without_new_matching_run(self):
+        revision = self.backend.rules()["revision"]
+        with mock.patch("controlroom.backend.subprocess.run", return_value=mock.Mock(returncode=0)), \
+             mock.patch("controlroom.backend.APPLY_VERIFY_SECONDS", 0):
+            with self.assertRaises(BackendError) as incomplete:
+                self.backend.apply(revision, "restart")
+        self.assertEqual(incomplete.exception.status, 503)
+        self.assertIn("확인하지 못했습니다", str(incomplete.exception))
+
+    def test_apply_rejects_wrong_manifest_or_failed_new_run(self):
+        revision = self.backend.rules()["revision"]
+        manifest_hash = ["0" * 64]
+        def restart_with_manifest(command, **_kwargs):
+            if command[:2] == ["systemctl", "restart"]:
+                new_id = str(uuid.uuid4())
+                new_run = self.data / "runs" / new_id
+                new_run.mkdir()
+                (new_run / "manifest.json").write_text(json.dumps({"config_sha256": manifest_hash[0]}))
+                (self.data / "current.json").write_text(json.dumps({"run_id": new_id}))
+            return mock.Mock(returncode=0)
+        with mock.patch("controlroom.backend.subprocess.run", side_effect=restart_with_manifest), \
+             mock.patch("controlroom.backend.APPLY_VERIFY_SECONDS", 0), \
+             mock.patch.object(self.backend, "_status", return_value={"state": "RUNNING"}):
+            with self.assertRaises(BackendError) as wrong_manifest:
+                self.backend.apply(revision, "restart")
+        self.assertEqual(wrong_manifest.exception.status, 503)
+
+        normalized = self.backend._manager_module().config(self.config)
+        canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+        manifest_hash[0] = hashlib.sha256(canonical).hexdigest()
+        with mock.patch("controlroom.backend.subprocess.run", side_effect=restart_with_manifest), \
+             mock.patch("controlroom.backend.APPLY_VERIFY_SECONDS", 0), \
+             mock.patch.object(self.backend, "_status", return_value={"state": "FAILED"}):
+            with self.assertRaises(BackendError) as failed_run:
+                self.backend.apply(revision, "restart")
+        self.assertEqual(failed_run.exception.status, 503)
 
 
 class HttpTests(Fixture):
