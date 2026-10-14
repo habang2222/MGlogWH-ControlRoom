@@ -139,6 +139,14 @@ sudo bash scripts/uninstall.sh
 
 ## 프로젝트 구조와 범위
 
+### 실제 서비스 연동 점검
+
+수집기와 Control Room을 같은 WSL 또는 Linux 호스트에 설치하고 두 서비스가 실행 중일 때, 관리자 권한으로 `scripts/live-integration-smoke.py --execute`를 실행할 수 있습니다. 이 점검은 로컬 인증 API로 임시 `event_rules` 규칙을 저장·적용해 새 run과 이벤트·파일 목록을 확인한 뒤 원래 설정을 복원하고 다시 적용합니다. 실행 중 새 run과 테스트 파일이 생성되며 이전 run은 삭제하지 않습니다. 실패하거나 중단되면 출력된 설정 백업 경로를 확인하세요. 운영 서버에서는 별도 점검 시간에 실행하세요.
+
+```bash
+sudo python3 scripts/live-integration-smoke.py --execute
+```
+
 `controlroom/`은 Python 서버, `web/`은 브라우저 화면, `scripts/`는 설치·제거·WSL 브라우저 실행 도구, `packaging/`은 서비스와 실행 명령입니다. 이 프로그램은 MGlogWH 수집기의 기존 raw·인덱스·설정 파일을 다룹니다. 인덱스가 누락한 원본을 복원하거나 로그 진위를 암호학적으로 증명하는 기능은 아닙니다.
 
 현재 이 저장소에는 최상위 LICENSE가 없습니다. 재배포와 상용 사용 조건은 저장소 소유자가 정해야 합니다.
